@@ -23,7 +23,7 @@ from anemoi.models.distributed.balanced_partition import get_balanced_partition_
 from anemoi.models.distributed.balanced_partition import get_partition_range
 from anemoi.models.distributed.shapes import ShardSizes
 from anemoi.training.data.data_reader import BaseAnemoiReader
-from anemoi.training.data.usable_indices import compute_valid_anchors
+from anemoi.training.data.usable_indices import compute_aligned_anchors
 from anemoi.training.utils.seeding import SeedContext
 from anemoi.training.utils.seeding import derive_seed
 from anemoi.training.utils.seeding import get_base_seed
@@ -93,8 +93,7 @@ class MultiDataset(IterableDataset):
 
         # Compute valid (sequence, position) anchors and a flat index over them
         # that the shuffle/shard logic operates on.
-        self.anchors = compute_valid_anchors(self.data_readers, relative_date_indices)
-        self.valid_date_indices = np.arange(len(self.anchors), dtype=np.int64)
+        self._set_anchors(relative_date_indices)
 
         # Normalize the date indices to use slices where possible.
         self.relative_date_indices = {
@@ -118,13 +117,23 @@ class MultiDataset(IterableDataset):
             return
 
         # Recompute valid (sequence, position) anchors for the updated rollout.
-        self.anchors = compute_valid_anchors(self.data_readers, relative_date_indices)
-        self.valid_date_indices = np.arange(len(self.anchors), dtype=np.int64)
+        self._set_anchors(relative_date_indices)
 
         # Normalize the date indices to use slices where possible.
         self.relative_date_indices = {
             name: normalize_time_indices(indices) for name, indices in relative_date_indices.items()
         }
+
+    def _set_anchors(self, relative_date_indices: dict[str, TimeIndices]) -> None:
+        """Compute the per-reader anchors of the shared samples.
+
+        Readers may have different frequencies, so the same sample can sit at a
+        different position in each reader. ``anchors`` holds the first reader's
+        anchors; ``reader_anchors`` those of every reader.
+        """
+        self.reader_anchors = compute_aligned_anchors(self.data_readers, relative_date_indices)
+        self.anchors = self.reader_anchors[self.dataset_names[0]]
+        self.valid_date_indices = np.arange(len(self.anchors), dtype=np.int64)
 
     def _lazy_init_model_and_reader_group_info(self) -> None:
         """Lazy initialize model and reader group info."""
@@ -191,14 +200,11 @@ class MultiDataset(IterableDataset):
 
     @cached_property
     def frequency(self) -> datetime.timedelta:
-        """Return combined frequency from all data readers."""
-        freqs = self._collect("frequency")
-        freq_ref = None
-        for name, freq in freqs.items():
-            if freq_ref is None:
-                freq_ref = freq
-            assert freq == freq_ref, f"Data reader '{name}' has different frequency than other data readers"
-        return freq_ref
+        """Return the frequency of the first (reference) data reader.
+
+        Readers may have different frequencies; samples are aligned by date.
+        """
+        return self.data_readers[self.dataset_names[0]].frequency
 
     def set_comm_group_info(
         self,
@@ -341,9 +347,9 @@ class MultiDataset(IterableDataset):
         )
 
     def get_sample(self, index: int) -> dict[str, torch.Tensor]:
-        sequence, position = (int(v) for v in self.anchors[index])
         x = {}
         for name, dataset in self.data_readers.items():
+            sequence, position = (int(v) for v in self.reader_anchors[name][index])
             time_steps = offset_time_indices(position, self.relative_date_indices[name])
             # self.shard_sizes is lazily initalised to None
             # This if statement guards against the case where shard_sizes is not set
