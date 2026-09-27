@@ -8,8 +8,28 @@
 # nor does it submit to any jurisdiction.
 
 
+import datetime
+from collections.abc import Callable
+from inspect import Parameter
+from inspect import signature
+
 from anemoi.training.tasks.base import BaseTask
 from anemoi.utils.dates import frequency_to_string
+
+
+def get_dataset_offsets(
+    method: Callable[..., list[datetime.timedelta]],
+    dataset_name: str,
+    **kwargs,
+) -> list[datetime.timedelta]:
+    """Call a task offset method with dataset_name when it supports that argument."""
+    parameters = signature(method).parameters
+    accepts_dataset_name = "dataset_name" in parameters or any(
+        parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if accepts_dataset_name:
+        return method(dataset_name=dataset_name, **kwargs)
+    return method(**kwargs)
 
 
 def compute_relative_date_indices(
@@ -18,10 +38,11 @@ def compute_relative_date_indices(
     **kwargs,
 ) -> dict[str, list[int]]:
     """Compute relative date indices for each dataset based on task offsets."""
-    offsets = task.get_offsets(**kwargs)
-
     relative_date_indices = {}
     for name, dr in data_readers.items():
+        # Older tasks define one set of offsets and accept only ``mode``. Tasks
+        # with dataset-specific temporal windows can also accept dataset_name.
+        offsets = get_dataset_offsets(task.get_offsets, name, **kwargs)
         if any(o % dr.frequency for o in offsets):
             msg = (
                 f"The frequency of `{name}` ({frequency_to_string(dr.frequency)}) is not compatible "
