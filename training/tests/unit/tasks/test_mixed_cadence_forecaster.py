@@ -117,3 +117,59 @@ def test_metadata_stores_native_offsets_and_advance_map() -> None:
     # global: t-6h <- t (input 1), t <- t+6h (output 0); regional: both slots from outputs
     assert global_ts["advance_map"] == {"inin": [(1, 0)], "outin": [(0, 1)]}
     assert regional_ts["advance_map"] == {"inin": [], "outin": [(0, 0), (1, 1)]}
+
+
+def _hours(offsets) -> list[float]:
+    return [offset / datetime.timedelta(hours=1) for offset in offsets]
+
+
+def test_regional_history_can_span_the_block() -> None:
+    """F(G[t-6], G[t], R[t-6], R[t-3], R[t]) -> (G[t+6], R[t+3], R[t+6])."""
+    task = MixedCadenceForecaster(
+        dataset_timesteps={"global": "6h", "regional": "3h"},
+        block_timestep="6h",
+        multistep_input={"global": 2, "regional": 3},
+    )
+    assert _hours(task.get_input_offsets("regional")) == [-6, -3, 0]
+    assert task.num_input_timesteps == {"global": 2, "regional": 3}
+    assert task._advance_maps["regional"] == {"inin": [(2, 0)], "outin": [(0, 1), (1, 2)]}
+
+
+def test_explicit_input_offsets_skip_intermediate_regional_dates() -> None:
+    """F(G[t-6], G[t], R[t-6], R[t]) -> (G[t+6], R[t+3], R[t+6])."""
+    task = MixedCadenceForecaster(
+        dataset_timesteps={"global": "6h", "regional": "3h"},
+        block_timestep="6h",
+        input_offsets={"regional": ["-6h", "0h"]},
+    )
+    assert _hours(task.get_input_offsets("regional")) == [-6, 0]
+    assert _hours(task.get_offsets("regional", mode="training")) == [-6, 0, 3, 6]
+    assert task._advance_maps["regional"] == {"inin": [(1, 0)], "outin": [(1, 1)]}
+
+    indices = _indices()
+    batch = {
+        "global": torch.zeros((1, 3, 1, 1, 2)),
+        "regional": torch.zeros((1, 4, 1, 1, 2)),
+    }
+    batch["global"][0, :, 0, 0, 0] = torch.tensor([-6, 0, 6])
+    batch["regional"][0, :, 0, 0, 0] = torch.tensor([-6, 0, 3, 6])
+    batch["regional"][0, :, 0, 0, 1] = torch.tensor([-60, 0, 30, 60])
+    x = task.get_inputs(batch, indices)
+    assert x["regional"][0, :, 0, 0, 0].tolist() == [-6, 0]
+
+    predicted = {
+        "global": torch.tensor([600.0]).reshape(1, 1, 1, 1, 1),
+        "regional": torch.tensor([300.0, 600.0]).reshape(1, 2, 1, 1, 1),
+    }
+    next_x = task.advance_input(x, predicted, batch, data_indices=indices)
+    assert next_x["regional"][0, :, 0, 0, 0].tolist() == [0, 600]
+    assert next_x["regional"][0, :, 0, 0, 1].tolist() == [0, 60]
+
+
+def test_input_offsets_must_be_reachable_from_the_previous_block() -> None:
+    with pytest.raises(ValueError, match="neither an input nor an output"):
+        MixedCadenceForecaster(
+            dataset_timesteps={"regional": "3h"},
+            block_timestep="6h",
+            input_offsets={"regional": ["-9h", "0h"]},
+        )

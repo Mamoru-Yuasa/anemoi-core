@@ -79,6 +79,8 @@ class MixedCadenceForecasterSchema(BaseModel):
     dataset_timesteps: dict[str, str] = Field(example={"global": "6h", "regional": "3h"})
     block_timestep: str = Field(example="6h")
     multistep_input: PositiveInt | dict[str, PositiveInt] = Field(example=2)
+    input_offsets: dict[str, list[str]] | None = Field(default=None, example={"regional": ["-6h", "0h"]})
+    "Explicit input offsets per dataset (ending at 0h); overrides multistep_input for those datasets."
     rollout: RolloutSchema = Field(...)
     validation_rollout: PositiveInt | None = Field(default=None, example=[None, 2])
     "Minimum number of blocks unrolled in validation; the training rollout is always unrolled."

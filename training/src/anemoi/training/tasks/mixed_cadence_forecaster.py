@@ -5,6 +5,7 @@
 
 """Forecast several datasets at their native cadences in a shared block."""
 
+import datetime
 from collections.abc import Mapping
 
 import torch
@@ -35,6 +36,7 @@ class MixedCadenceForecaster(BaseForecaster):
         dataset_timesteps: Mapping[str, str],
         block_timestep: str,
         multistep_input: int | Mapping[str, int] = 2,
+        input_offsets: Mapping[str, list[str]] | None = None,
         rollout: dict | None = None,
         validation_rollout: int | None = None,
     ) -> None:
@@ -55,8 +57,10 @@ class MixedCadenceForecaster(BaseForecaster):
                 raise ValueError("multistep_input dataset names must match dataset_timesteps")
         if any(not isinstance(count, int) or count < 1 for count in input_counts.values()):
             raise ValueError("multistep_input must contain positive integers")
+        explicit_inputs = dict(input_offsets or {})
+        if set(explicit_inputs) - set(self.dataset_timesteps):
+            raise ValueError("input_offsets dataset names must be in dataset_timesteps")
 
-        self._input_counts = input_counts
         self._output_counts = {}
         self._input_offsets_by_dataset = {}
         self._output_offsets_by_dataset = {}
@@ -64,8 +68,19 @@ class MixedCadenceForecaster(BaseForecaster):
             if timestep.total_seconds() <= 0 or block % timestep:
                 raise ValueError(f"Dataset {name!r} timestep must divide block_timestep exactly")
             self._output_counts[name] = block // timestep
-            self._input_offsets_by_dataset[name] = sorted(-i * timestep for i in range(input_counts[name]))
             self._output_offsets_by_dataset[name] = [(i + 1) * timestep for i in range(self._output_counts[name])]
+            if name in explicit_inputs:
+                offsets = sorted({frequency_to_timedelta(o) for o in explicit_inputs[name]})
+                if not offsets or offsets[-1] != datetime.timedelta(0) or any(o % timestep for o in offsets):
+                    raise ValueError(
+                        f"input_offsets of {name!r} must end at 0h and be multiples of its timestep, got "
+                        f"{explicit_inputs[name]}"
+                    )
+            else:
+                # By default the latest `multistep_input` states at the dataset's own cadence.
+                offsets = sorted(-i * timestep for i in range(input_counts[name]))
+            self._input_offsets_by_dataset[name] = offsets
+        self._input_counts = {name: len(offsets) for name, offsets in self._input_offsets_by_dataset.items()}
 
         super().__init__(
             input_offsets=[],
@@ -78,6 +93,8 @@ class MixedCadenceForecaster(BaseForecaster):
             raise ValueError("Rollout lengths must be positive and maximum >= start")
         if validation_rollout is not None and validation_rollout < 1:
             raise ValueError("validation_rollout must be positive")
+        # Every input of the next block must be an input or an output of this one.
+        self._advance_maps = {name: self._advance_map(name) for name in self.dataset_timesteps}
 
     @property
     def block_timestep(self):
@@ -142,32 +159,38 @@ class MixedCadenceForecaster(BaseForecaster):
         output_mask: dict | None = None,
         grid_shard_slice: dict | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Use each dataset's latest predictions as the next block's state."""
+        """Build the next block's input from this block's inputs and predictions.
+
+        Each next input slot is filled following the dataset's advance map: from
+        a prediction of this block ("outin", prognostic variables, with forcings
+        from the batch) or from a current input slot ("inin").
+        """
         for name, state in x.items():
-            keep = min(self._input_counts[name], self._output_counts[name])
-            state = state.roll(-keep, dims=1)
-            output_indices = self.get_batch_output_indices(name, rollout_step)
             indices = data_indices[name]
-            for i in range(keep):
-                position = -(i + 1)
-                state[:, position, ..., indices.model.input.prognostic] = y_pred[name][
-                    :, position, ..., indices.model.output.prognostic
+            advance_map = self._advance_maps[name]
+            output_indices = self.get_batch_output_indices(name, rollout_step)
+            new_state = state.clone()
+            for old_idx, new_idx in advance_map["inin"]:
+                new_state[:, new_idx] = state[:, old_idx]
+            for out_idx, new_idx in advance_map["outin"]:
+                new_state[:, new_idx, ..., indices.model.input.prognostic] = y_pred[name][
+                    :, out_idx, ..., indices.model.output.prognostic
                 ]
-                truth = batch[name][:, output_indices[position]]
+                truth = batch[name][:, output_indices[out_idx]]
                 mask = None if output_mask is None else output_mask[name]
                 if mask is not None:
-                    if truth.shape[1] == 1 and state[:, position].shape[1] != 1:
-                        truth = truth.expand(-1, state[:, position].shape[1], -1, -1)
-                    state[:, position] = mask.rollout_boundary(
-                        state[:, position],
+                    if truth.shape[1] == 1 and new_state[:, new_idx].shape[1] != 1:
+                        truth = truth.expand(-1, new_state[:, new_idx].shape[1], -1, -1)
+                    new_state[:, new_idx] = mask.rollout_boundary(
+                        new_state[:, new_idx],
                         truth,
                         indices,
                         grid_shard_slice=None if grid_shard_slice is None else grid_shard_slice[name],
                     )
-                state[:, position, ..., indices.model.input.forcing] = batch[name][
-                    :, output_indices[position], ..., indices.data.input.forcing
+                new_state[:, new_idx, ..., indices.model.input.forcing] = batch[name][
+                    :, output_indices[out_idx], ..., indices.data.input.forcing
                 ]
-            x[name] = state
+            x[name] = new_state
         return x
 
     def _advance_map(self, dataset_name: str) -> dict[str, list[tuple[int, int]]]:
@@ -180,8 +203,12 @@ class MixedCadenceForecaster(BaseForecaster):
             shifted = offset + self.block_timestep
             if shifted in out_to_idx:
                 advance_map["outin"].append((out_to_idx[shifted], new_idx))
-            else:
+            elif shifted in in_to_idx:
                 advance_map["inin"].append((in_to_idx[shifted], new_idx))
+            else:
+                raise ValueError(
+                    f"Input offset {offset} of {dataset_name!r} is neither an input nor an output one block later"
+                )
         return advance_map
 
     def fill_metadata(self, md_dict: dict) -> None:
