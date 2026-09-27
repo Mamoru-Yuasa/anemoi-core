@@ -16,8 +16,11 @@ from omegaconf import OmegaConf
 from torch_geometric.data import HeteroData
 
 import anemoi.models.models.base as base_model_module
+from anemoi.models.interface import AnemoiModelInterface
 from anemoi.models.models.base import BaseGraphModel
 from anemoi.models.models.encoder_processor_decoder import AnemoiModelEncProcDec
+from anemoi.models.preprocessing import Processors
+from anemoi.models.preprocessing import StepwiseProcessors
 
 
 class DummyGraphModel(BaseGraphModel):
@@ -502,3 +505,22 @@ def test_encoder_processor_decoder_uses_dataset_output_steps() -> None:
     model.fill_metadata(metadata)
     assert metadata["metadata_inference"]["data"]["shapes"]["input_timesteps"] == 1
     assert metadata["metadata_inference"]["regional"]["shapes"]["input_timesteps"] == 2
+
+
+def test_interface_uses_dataset_output_steps_for_tendency_processors() -> None:
+    interface = AnemoiModelInterface.__new__(AnemoiModelInterface)
+    torch.nn.Module.__init__(interface)
+    interface.n_step_output = {"data": 1, "regional": 3}
+    statistics_tendencies = {
+        "lead_times": ["PT3H", "PT6H", "PT9H"],
+        "PT3H": {},
+        "PT6H": {},
+        "PT9H": {},
+    }
+
+    global_pre, _ = interface._build_tendency_processors("data", {}, None, statistics_tendencies)
+    regional_pre, _ = interface._build_tendency_processors("regional", {}, None, statistics_tendencies)
+
+    assert isinstance(global_pre, Processors)
+    assert isinstance(regional_pre, StepwiseProcessors)
+    assert len(regional_pre) == 3
