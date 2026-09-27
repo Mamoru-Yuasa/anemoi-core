@@ -170,17 +170,43 @@ class MixedCadenceForecaster(BaseForecaster):
             x[name] = state
         return x
 
+    def _advance_map(self, dataset_name: str) -> dict[str, list[tuple[int, int]]]:
+        """Map next-block input slots to this block's outputs ("outin") or inputs ("inin")."""
+        inputs = self.get_input_offsets(dataset_name)
+        out_to_idx = {offset: j for j, offset in enumerate(self.get_output_offsets(dataset_name))}
+        in_to_idx = {offset: j for j, offset in enumerate(inputs)}
+        advance_map = {"inin": [], "outin": []}
+        for new_idx, offset in enumerate(inputs):
+            shifted = offset + self.block_timestep
+            if shifted in out_to_idx:
+                advance_map["outin"].append((out_to_idx[shifted], new_idx))
+            else:
+                advance_map["inin"].append((in_to_idx[shifted], new_idx))
+        return advance_map
+
     def fill_metadata(self, md_dict: dict) -> None:
-        md_dict["task"] = self.name
+        """Write each dataset's native-cadence timesteps.
+
+        Besides the relative date indices (in units of the dataset's own
+        timestep), the offset-based keys used by OffsetForecaster checkpoints
+        (``input_offsets``, ``output_offsets``, ``rollout_shift`` and
+        ``advance_map``) are stored per dataset, so inference can build the
+        input window and advance it without task-specific code.
+        """
         md_dict["metadata_inference"]["task"] = self.name
         for name in md_dict["metadata_inference"]["dataset_names"]:
             timestep = self.dataset_timesteps[name]
-            inputs = [offset // timestep for offset in self.get_input_offsets(name)]
-            outputs = [offset // timestep for offset in self.get_output_offsets(name)]
+            input_offsets = self.get_input_offsets(name)
+            output_offsets = self.get_output_offsets(name)
+            inputs = [offset // timestep for offset in input_offsets]
+            outputs = [offset // timestep for offset in output_offsets]
             md_dict["metadata_inference"][name]["timesteps"] = {
                 "relative_date_indices_training": sorted(set(inputs + outputs)),
                 "input_relative_date_indices": inputs,
                 "output_relative_date_indices": outputs,
                 "timestep": frequency_to_string(timestep),
-                "block_timestep": frequency_to_string(self.block_timestep),
+                "input_offsets": [frequency_to_string(offset) for offset in input_offsets],
+                "output_offsets": [frequency_to_string(offset) for offset in output_offsets],
+                "rollout_shift": frequency_to_string(self.block_timestep),
+                "advance_map": self._advance_map(name),
             }
