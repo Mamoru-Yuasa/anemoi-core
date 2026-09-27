@@ -12,6 +12,7 @@ from omegaconf import DictConfig
 from anemoi.models.data_indices.collection import IndexCollection
 from anemoi.training.tasks import MixedCadenceForecaster
 from anemoi.training.utils.masks import NoOutputMask
+from anemoi.utils.dates import frequency_to_timedelta
 
 
 def _indices() -> dict[str, IndexCollection]:
@@ -92,3 +93,27 @@ def test_rollout_curriculum_extends_loaded_blocks() -> None:
     assert len(task.steps("training")) == 2
     assert task.get_offsets("regional", mode="training")[-1] == datetime.timedelta(hours=12)
     assert task.training_runtime_state_dict()["rollout"]["step"] == 2
+
+
+
+def test_metadata_stores_native_offsets_and_advance_map() -> None:
+    task = MixedCadenceForecaster(
+        dataset_timesteps={"global": "6h", "regional": "3h"},
+        block_timestep="6h",
+        multistep_input=2,
+    )
+    md = {"metadata_inference": {"dataset_names": ["global", "regional"], "global": {}, "regional": {}}}
+    task.fill_metadata(md)
+
+    global_ts = md["metadata_inference"]["global"]["timesteps"]
+    regional_ts = md["metadata_inference"]["regional"]["timesteps"]
+    assert md["metadata_inference"]["task"] == "mixed-cadence-forecaster"
+    assert global_ts["timestep"] == "6h"
+    hours = lambda offsets: [frequency_to_timedelta(o) / datetime.timedelta(hours=1) for o in offsets]  # noqa: E731
+    assert hours(global_ts["input_offsets"]) == [-6, 0]
+    assert hours(global_ts["output_offsets"]) == [6]
+    assert hours(regional_ts["output_offsets"]) == [3, 6]
+    assert global_ts["rollout_shift"] == regional_ts["rollout_shift"] == "6h"
+    # global: t-6h <- t (input 1), t <- t+6h (output 0); regional: both slots from outputs
+    assert global_ts["advance_map"] == {"inin": [(1, 0)], "outin": [(0, 1)]}
+    assert regional_ts["advance_map"] == {"inin": [], "outin": [(0, 0), (1, 1)]}
