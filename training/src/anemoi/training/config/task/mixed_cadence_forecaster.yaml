@@ -1,0 +1,9 @@
+_target_: anemoi.training.tasks.MixedCadenceForecaster
+block_timestep: 6h
+dataset_timesteps: {}
+multistep_input: 2
+rollout:
+  start: 1
+  epoch_increment: 0
+  maximum: 1
+validation_rollout: null

@@ -72,6 +72,18 @@ class AutoencoderTaskSchema(BaseModel):
     "Task class path for the autoencoding task."
 
 
+class MixedCadenceForecasterSchema(BaseModel):
+    """Forecast datasets at different native cadences in one common block."""
+
+    target_: Literal["anemoi.training.tasks.MixedCadenceForecaster"] = Field(..., alias="_target_")
+    dataset_timesteps: dict[str, str] = Field(example={"global": "6h", "regional": "3h"})
+    block_timestep: str = Field(example="6h")
+    multistep_input: PositiveInt | dict[str, PositiveInt] = Field(example=2)
+    rollout: RolloutSchema = Field(...)
+    validation_rollout: PositiveInt | None = Field(default=None, example=[None, 2])
+    "Minimum number of blocks unrolled in validation; the training rollout is always unrolled."
+
+
 class TemporalDownscalerSchema(BaseModel):
     """Configuration for temporal downscaling task."""
 
@@ -88,6 +100,10 @@ class TemporalDownscalerSchema(BaseModel):
 
 
 TaskSchema = Annotated[
-    ForecasterSchema | OffsetForecasterSchema | AutoencoderTaskSchema | TemporalDownscalerSchema,
+    ForecasterSchema
+    | OffsetForecasterSchema
+    | MixedCadenceForecasterSchema
+    | AutoencoderTaskSchema
+    | TemporalDownscalerSchema,
     Discriminator("target_"),
 ]
