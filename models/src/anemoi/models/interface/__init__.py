@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 import uuid
+from collections.abc import Mapping
 from typing import Optional
 
 import torch
@@ -34,8 +35,8 @@ class AnemoiModelInterface(torch.nn.Module):
         Configuration settings for the model.
     id : str
         A unique identifier for the model instance.
-    n_step_input : int
-        Number of input timesteps provided to the model.
+    n_step_input : int or Mapping[str, int]
+        Number of input timesteps provided to the model, optionally by dataset.
     graph_data : HeteroData
         Graph data for the model.
     statistics : dict
@@ -60,8 +61,8 @@ class AnemoiModelInterface(torch.nn.Module):
         self,
         *,
         config: DictConfig,
-        n_step_input: int,
-        n_step_output: int,
+        n_step_input: int | Mapping[str, int],
+        n_step_output: int | Mapping[str, int],
         graph_data: HeteroData,
         statistics: dict,
         data_indices: dict,
@@ -85,6 +86,7 @@ class AnemoiModelInterface(torch.nn.Module):
 
     def _build_processors_for_dataset(
         self,
+        dataset_name: str,
         processors_configs: dict,
         statistics: dict,
         data_indices: dict,
@@ -99,6 +101,8 @@ class AnemoiModelInterface(torch.nn.Module):
 
         Parameters
         ----------
+        dataset_name : str
+            Name of the dataset.
         processors_configs : dict
             Configuration for the processors.
         statistics : dict
@@ -119,6 +123,7 @@ class AnemoiModelInterface(torch.nn.Module):
             statistics,
         )
         pre_processors_tendencies, post_processors_tendencies = self._build_tendency_processors(
+            dataset_name,
             processors_configs,
             data_indices,
             statistics_tendencies,
@@ -139,6 +144,7 @@ class AnemoiModelInterface(torch.nn.Module):
 
     def _build_tendency_processors(
         self,
+        dataset_name: str,
         processors_configs: dict,
         data_indices: dict,
         statistics_tendencies: dict | None,
@@ -150,7 +156,12 @@ class AnemoiModelInterface(torch.nn.Module):
             return self._build_processor_pair(processors_configs, data_indices, statistics_tendencies)
 
         lead_times = list(statistics_tendencies.get("lead_times") or [])
-        if self.n_step_output == 1:
+        n_step_output = (
+            self.n_step_output[dataset_name]
+            if isinstance(self.n_step_output, Mapping)
+            else self.n_step_output
+        )
+        if n_step_output == 1:
             step_stats = statistics_tendencies.get(lead_times[0]) if lead_times else None
             stats_for_tendencies = step_stats or statistics_tendencies
             return self._build_processor_pair(processors_configs, data_indices, stats_for_tendencies)
@@ -178,6 +189,7 @@ class AnemoiModelInterface(torch.nn.Module):
         for dataset_name in self.statistics.keys():
             # Build processors for each dataset
             pre, post, pre_tend, post_tend = self._build_processors_for_dataset(
+                dataset_name,
                 data_config[dataset_name].processors,
                 self.statistics[dataset_name],
                 self.data_indices[dataset_name],
