@@ -19,7 +19,7 @@ from torch.utils.data import Dataset
 from anemoi.models.distributed.balanced_partition import get_partition_range
 from anemoi.models.distributed.shapes import ShardSizes
 from anemoi.training.data.data_reader import BaseAnemoiReader
-from anemoi.training.data.usable_indices import compute_valid_anchors
+from anemoi.training.data.usable_indices import compute_aligned_anchors
 from anemoi.training.utils.time_indices import TimeIndices
 from anemoi.training.utils.time_indices import normalize_time_indices
 from anemoi.training.utils.time_indices import offset_time_indices
@@ -87,8 +87,12 @@ class MultiDataset(Dataset):
         Call this before the dataloader is created: the number of samples changes
         with the time steps, and the sampler reads it when it is constructed.
         """
-        # Compute valid (sequence, position) anchors; each dataset index refers to one anchor.
-        self.anchors = compute_valid_anchors(self.data_readers, relative_date_indices)
+        # Compute the valid anchors of the shared samples; each dataset index refers
+        # to one sample. Readers may have different frequencies, so the same sample
+        # can sit at a different position in each reader: ``reader_anchors`` holds
+        # every reader's anchors, ``anchors`` those of the first reader.
+        self.reader_anchors = compute_aligned_anchors(self.data_readers, relative_date_indices)
+        self.anchors = self.reader_anchors[self.dataset_names[0]]
 
         # Normalize the date indices to use slices where possible.
         self.relative_date_indices = {
@@ -140,14 +144,11 @@ class MultiDataset(Dataset):
 
     @cached_property
     def frequency(self) -> datetime.timedelta:
-        """Return combined frequency from all data readers."""
-        freqs = self._collect("frequency")
-        freq_ref = None
-        for name, freq in freqs.items():
-            if freq_ref is None:
-                freq_ref = freq
-            assert freq == freq_ref, f"Data reader '{name}' has different frequency than other data readers"
-        return freq_ref
+        """Return the frequency of the first (reference) data reader.
+
+        Readers may have different frequencies; samples are aligned by date.
+        """
+        return self.data_readers[self.dataset_names[0]].frequency
 
     def set_reader_group_info(
         self,
@@ -167,9 +168,9 @@ class MultiDataset(Dataset):
         self.shard_sizes = shard_sizes
 
     def get_sample(self, index: int) -> dict[str, torch.Tensor]:
-        sequence, position = (int(v) for v in self.anchors[index])
         x = {}
         for name, dataset in self.data_readers.items():
+            sequence, position = (int(v) for v in self.reader_anchors[name][index])
             time_steps = offset_time_indices(position, self.relative_date_indices[name])
             # self.shard_sizes is lazily initalised to None
             # This if statement guards against the case where shard_sizes is not set

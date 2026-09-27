@@ -8,13 +8,16 @@
 # nor does it submit to any jurisdiction.
 
 
+import datetime
 import re
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 from pytest_mock import MockFixture
 
+from anemoi.training.data.data_reader import NativeGridDataset
 from anemoi.training.data.multidataset import MultiDataset
 
 
@@ -121,3 +124,72 @@ class TestMultiDataset:
 
         with pytest.raises(ValueError, match="No valid anchors found after intersection across all datasets"):
             MultiDataset(data_readers=data_readers, relative_date_indices=relative_date_indices)
+
+
+def _native_reader(dates: np.ndarray, hours: int, missing: set[int] | None = None) -> NativeGridDataset:
+    """Return a NativeGridDataset over an in-memory time axis (no data values)."""
+    reader = NativeGridDataset.__new__(NativeGridDataset)
+    reader.data = SimpleNamespace(
+        dates=dates,
+        frequency=datetime.timedelta(hours=hours),
+        missing=missing or set(),
+    )
+    reader.default_sampling = {"stride": 1}
+    return reader
+
+
+def test_mixed_frequency_samples_align_by_date_and_respect_missing_values(mocker: MockFixture) -> None:
+    """Reader positions can differ even when they refer to the same anchor date."""
+    start = np.datetime64("2020-01-01T00")
+    global_reader = _native_reader(start + np.arange(5) * np.timedelta64(6, "h"), 6, missing={3})  # t+18h
+    # The regional series begins three hours before the global series.
+    regional_reader = _native_reader(start + (np.arange(10) - 1) * np.timedelta64(3, "h"), 3, missing={4})  # t+9h
+
+    dataset = MultiDataset(
+        data_readers={"global": global_reader, "regional": regional_reader},
+        relative_date_indices={"global": [0, 1], "regional": [0, 1]},
+    )
+
+    # t=0 is the sole anchor valid for both windows; its regional position is 1.
+    np.testing.assert_array_equal(dataset.reader_anchors["global"], [[0, 0]])
+    np.testing.assert_array_equal(dataset.reader_anchors["regional"], [[0, 1]])
+
+    get_global = mocker.patch.object(global_reader, "get_sample")
+    get_regional = mocker.patch.object(regional_reader, "get_sample")
+    dataset.get_sample(0)
+    assert get_global.call_args.args[1] == slice(0, 2, 1)
+    assert get_regional.call_args.args[1] == slice(1, 3, 1)
+
+
+def test_mixed_frequency_supports_hourly_regional_reader(mocker: MockFixture) -> None:
+    start = np.datetime64("2020-01-01T00")
+    global_reader = _native_reader(start + np.arange(4) * np.timedelta64(6, "h"), 6)
+    regional_reader = _native_reader(start + np.arange(19) * np.timedelta64(1, "h"), 1)
+
+    dataset = MultiDataset(
+        data_readers={"global": global_reader, "regional": regional_reader},
+        relative_date_indices={"global": [0, 1], "regional": [0, 1, 2, 3, 4, 5, 6]},
+    )
+
+    np.testing.assert_array_equal(dataset.reader_anchors["global"][:, 1], [0, 1, 2])
+    np.testing.assert_array_equal(dataset.reader_anchors["regional"][:, 1], [0, 6, 12])
+    get_regional = mocker.patch.object(regional_reader, "get_sample")
+    mocker.patch.object(global_reader, "get_sample")
+    dataset.get_sample(1)
+    assert get_regional.call_args.args[1] == slice(6, 13, 1)
+
+
+def test_mixed_frequency_rejects_unmarked_date_gaps() -> None:
+    """A position step must represent its declared time interval, even without a missing flag."""
+    start = np.datetime64("2020-01-01T00")
+    global_reader = _native_reader(start + np.arange(3) * np.timedelta64(6, "h"), 6)
+    # The 07 UTC timestamp is absent: position 7 is 08 UTC, not 07 UTC.
+    hours = np.array([0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12])
+    regional_reader = _native_reader(start + hours * np.timedelta64(1, "h"), 1)
+
+    dataset = MultiDataset(
+        data_readers={"global": global_reader, "regional": regional_reader},
+        relative_date_indices={"global": [0, 1], "regional": [0, 1]},
+    )
+
+    np.testing.assert_array_equal(dataset.reader_anchors["global"][:, 1], [0])
