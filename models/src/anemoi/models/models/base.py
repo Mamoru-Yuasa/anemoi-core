@@ -10,6 +10,7 @@
 
 import logging
 from abc import abstractmethod
+from collections.abc import Mapping
 from typing import Optional
 
 import torch
@@ -45,8 +46,8 @@ class BaseGraphModel(nn.Module):
         model_config: DictConfig,
         data_indices: dict,
         statistics: dict,
-        n_step_input: int,
-        n_step_output: int,
+        n_step_input: int | Mapping[str, int],
+        n_step_output: int | Mapping[str, int],
         graph_data: HeteroData,
     ) -> None:
         """Initializes the graph neural network.
@@ -66,10 +67,15 @@ class BaseGraphModel(nn.Module):
         self._graph_data = graph_data
         self.data_indices = data_indices
         self.statistics = statistics
-        self.n_step_input = n_step_input
-        self.n_step_output = n_step_output
-
         self.dataset_names = list(data_indices.keys())
+        has_dataset_counts = isinstance(n_step_input, Mapping) or isinstance(n_step_output, Mapping)
+        if has_dataset_counts and not self._supports_dataset_timestep_counts():
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support per-dataset timestep counts; "
+                "use AnemoiModelEncProcDec or configure scalar counts."
+            )
+        self.n_step_input = self._validate_step_count(n_step_input, "n_step_input")
+        self.n_step_output = self._validate_step_count(n_step_output, "n_step_output")
         self._graph_name_hidden = model_config.model.model.hidden_nodes_name
 
         self.latent_skip = model_config.model.model.latent_skip
@@ -177,6 +183,41 @@ class BaseGraphModel(nn.Module):
             source_channels=latent_aggregator_channels,
         )
 
+    def _supports_dataset_timestep_counts(self) -> bool:
+        """Subclasses must opt in after handling counts in all model paths."""
+        return False
+
+    def _validate_step_count(
+        self,
+        count: int | Mapping[str, int],
+        name: str,
+    ) -> int | dict[str, int]:
+        if isinstance(count, Mapping):
+            missing = set(self.dataset_names) - set(count)
+            extra = set(count) - set(self.dataset_names)
+            if missing or extra:
+                raise ValueError(
+                    f"{name} dataset names do not match model datasets: "
+                    f"missing={sorted(missing)}, extra={sorted(extra)}"
+                )
+            counts = dict(count)
+            for dataset_name, value in counts.items():
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError(f"{name}[{dataset_name!r}] must be a positive integer, got {value!r}")
+            return counts
+
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError(f"{name} must be a positive integer, got {count!r}")
+        return count
+
+    def n_step_input_for_dataset(self, dataset_name: str) -> int:
+        """Return the input history length for one dataset."""
+        return self.n_step_input[dataset_name] if isinstance(self.n_step_input, dict) else self.n_step_input
+
+    def n_step_output_for_dataset(self, dataset_name: str) -> int:
+        """Return the output sequence length for one dataset."""
+        return self.n_step_output[dataset_name] if isinstance(self.n_step_output, dict) else self.n_step_output
+
     def _calculate_shapes_and_indices(self, data_indices: dict) -> None:
         """Compute per-dataset input/output channel counts, dimensions and internal data indices."""
         # Multi-dataset: create dictionaries for each property
@@ -229,7 +270,10 @@ class BaseGraphModel(nn.Module):
 
     def _calculate_input_dim(self, dataset_name: str) -> int:
         """Calculate the encoder input dimension for a given dataset."""
-        return self.n_step_input * self.num_input_channels[dataset_name] + self.node_attributes.attr_ndims[dataset_name]
+        return (
+            self.n_step_input_for_dataset(dataset_name) * self.num_input_channels[dataset_name]
+            + self.node_attributes.attr_ndims[dataset_name]
+        )
 
     def _calculate_input_dim_latent(self) -> int:
         """Calculate the latent input dimension."""
@@ -254,7 +298,7 @@ class BaseGraphModel(nn.Module):
 
     def _calculate_output_dim(self, dataset_name: str) -> int:
         """Calculate the decoder output dimension for a given dataset."""
-        return self.n_step_output * self.num_output_channels[dataset_name]
+        return self.n_step_output_for_dataset(dataset_name) * self.num_output_channels[dataset_name]
 
     def _assert_matching_indices(self, data_indices: dict) -> None:
         # Multi-dataset: check assertions for each dataset
@@ -430,7 +474,7 @@ class BaseGraphModel(nn.Module):
         batch: dict[str, torch.Tensor],
         pre_processors: nn.ModuleDict,
         post_processors: nn.ModuleDict,
-        n_step_input: int,
+        n_step_input: int | Mapping[str, int],
         model_comm_group: Optional[ProcessGroup] = None,
         gather_out: bool = True,
         spatial_pre_processors: Optional[nn.ModuleDict] = None,
@@ -449,8 +493,8 @@ class BaseGraphModel(nn.Module):
             Pre-processing module.
         post_processors : nn.Module
             Post-processing module.
-        n_step_input : int
-            Number of input timesteps.
+        n_step_input : int or Mapping[str, int]
+            Number of input timesteps, optionally by dataset.
         model_comm_group : Optional[ProcessGroup]
             Process group for distributed training.
         gather_out : bool
@@ -477,9 +521,9 @@ class BaseGraphModel(nn.Module):
 
             x = {}
             for dataset_name in dataset_names:
-                x[dataset_name] = batch[dataset_name][
-                    :, 0:n_step_input, None, ...
-                ]  # add dummy ensemble dimension as 3rd index
+                dataset_n_step_input = n_step_input[dataset_name] if isinstance(n_step_input, Mapping) else n_step_input
+                # Add a dummy ensemble dimension as the third index.
+                x[dataset_name] = batch[dataset_name][:, 0:dataset_n_step_input, None, ...]
 
             # Handle distributed processing
             grid_shard_sizes: DatasetShardSizes | None = None

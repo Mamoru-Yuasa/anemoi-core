@@ -34,6 +34,11 @@ LOGGER = logging.getLogger(__name__)
 class AnemoiModelEncProcDec(BaseGraphModel):
     """Message passing graph neural network."""
 
+    def _supports_dataset_timestep_counts(self) -> bool:
+        # Other subclasses (ensemble and autoencoder) still use scalar counts
+        # directly in their own input/output assembly methods.
+        return type(self) is AnemoiModelEncProcDec
+
     def _build_networks(self, model_config: DotDict) -> None:
         """Builds the model components."""
         # Encoder data -> hidden
@@ -165,7 +170,7 @@ class AnemoiModelEncProcDec(BaseGraphModel):
             x,
             grid_shard_sizes=grid_shard_sizes,
             model_comm_group=model_comm_group,
-            n_step_output=self.n_step_output,
+            n_step_output=self.n_step_output_for_dataset(dataset_name),
         )
 
         if grid_shard_sizes is not None:
@@ -238,7 +243,7 @@ class AnemoiModelEncProcDec(BaseGraphModel):
                 "(batch ensemble grid) (time vars) -> batch time ensemble grid vars",
                 batch=batch_size,
                 ensemble=ensemble_size,
-                time=self.n_step_output,
+                time=self.n_step_output_for_dataset(dataset_name),
             )
             .to(dtype=dtype)
             .clone()
@@ -448,7 +453,7 @@ class AnemoiModelEncProcDec(BaseGraphModel):
         for dataset in self.input_dim.keys():
             shapes = {
                 "variables": self.input_dim[dataset],
-                "input_timesteps": self.n_step_input,
+                "input_timesteps": self.n_step_input_for_dataset(dataset),
                 "ensemble": 1,
                 "grid": None,  # grid size is dynamic
             }

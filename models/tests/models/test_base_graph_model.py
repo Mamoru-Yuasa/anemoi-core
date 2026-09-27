@@ -9,6 +9,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
@@ -16,6 +17,7 @@ from torch_geometric.data import HeteroData
 
 import anemoi.models.models.base as base_model_module
 from anemoi.models.models.base import BaseGraphModel
+from anemoi.models.models.encoder_processor_decoder import AnemoiModelEncProcDec
 
 
 class DummyGraphModel(BaseGraphModel):
@@ -293,3 +295,210 @@ def test_predict_step_replaces_source_grid_shard_sizes(monkeypatch):
     )
 
     assert out["data"].shape[-2] == 2
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset timestep counts (e.g. global 6h and regional 3h/1h in one block)
+# ---------------------------------------------------------------------------
+
+MIXED_DATASETS = ("data", "regional")
+
+
+class DummyMixedGraphModel(DummyGraphModel):
+    def _supports_dataset_timestep_counts(self) -> bool:
+        return True
+
+    def forward(self, x, **kwargs):
+        return x
+
+
+class EncProcDecSubclass(AnemoiModelEncProcDec):
+    """Subclasses assemble tensors themselves and must opt in explicitly."""
+
+
+class IdentityProcessor(torch.nn.Module):
+    def forward(self, x, in_place=False):
+        return x
+
+
+def _mixed_model_config(pointwise: bool = False):
+    encoder_mapper = {}
+    decoder_mapper = {}
+    extra = {}
+    if pointwise:
+        encoder_mapper = {
+            "_target_": "anemoi.models.layers.mapper.PointWiseForwardMapper",
+            "num_channels": 8,
+            "layer_kernels": {},
+            "gradient_checkpointing": False,
+        }
+        decoder_mapper = {
+            "_target_": "anemoi.models.layers.mapper.PointWiseBackwardMapper",
+            "num_channels": 8,
+            "layer_kernels": {},
+            "gradient_checkpointing": False,
+        }
+        extra = {
+            "processor": {
+                "_target_": "anemoi.models.layers.processor.PointWiseMLPProcessor",
+                "num_channels": 8,
+                "num_layers": 1,
+                "num_chunks": 1,
+                "mlp_hidden_ratio": 2,
+                "layer_kernels": {},
+                "gradient_checkpointing": False,
+            },
+            "latent_aggregator": {"_target_": "anemoi.models.layers.aggregator.SumAggregator"},
+        }
+    return OmegaConf.create(
+        {
+            "model": {
+                "num_channels": 8,
+                "node_trainable_parameters": {"data": 0, "regional": 0, "hidden": 0},
+                "model": {"hidden_nodes_name": "hidden", "latent_skip": False},
+                "encoders": {
+                    name: {
+                        "source_datasets": [name],
+                        "dataset_fusing_strategy": "not_supported",
+                        "mapper": encoder_mapper,
+                    }
+                    for name in MIXED_DATASETS
+                },
+                "decoders": {
+                    name: {
+                        "target_datasets": [name],
+                        "target_node_features": ["coordinates"],
+                        "mapper": decoder_mapper,
+                    }
+                    for name in MIXED_DATASETS
+                },
+                "residual": {
+                    "datasets": {
+                        name: {"_target_": "anemoi.models.layers.residual.SkipConnection"} for name in MIXED_DATASETS
+                    },
+                },
+                "bounding": {"datasets": {name: [] for name in MIXED_DATASETS}},
+                **extra,
+            },
+        },
+    )
+
+
+def _make_mixed_model(
+    n_step_input: int | dict[str, int],
+    n_step_output: int | dict[str, int],
+    model_type: type[BaseGraphModel] = DummyMixedGraphModel,
+    pointwise: bool = False,
+) -> BaseGraphModel:
+    data_indices = _make_data_indices()
+    data_indices["regional"] = data_indices["data"]
+    graph = _make_graph()
+    graph["regional"].x = torch.zeros(2, 2)
+    graph["regional"].num_nodes = 2
+    if pointwise:
+        # PointWiseMapper needs the hidden and data node counts to match.
+        graph["hidden"].x = torch.zeros(2, 2)
+        graph["hidden"].num_nodes = 2
+    return model_type(
+        model_config=_mixed_model_config(pointwise),
+        data_indices=data_indices,
+        statistics=dict.fromkeys(MIXED_DATASETS),
+        n_step_input=n_step_input,
+        n_step_output=n_step_output,
+        graph_data=graph,
+    )
+
+
+def test_per_dataset_timestep_counts_set_input_and_output_widths() -> None:
+    model = _make_mixed_model(
+        n_step_input={"data": 1, "regional": 2},
+        n_step_output={"data": 1, "regional": 3},
+    )
+
+    assert model.input_dim == {"data": 5, "regional": 6}
+    assert model.output_dim == {"data": 1, "regional": 3}
+
+
+@pytest.mark.parametrize("regional_output_steps", [2, 6])
+def test_encoder_processor_decoder_forward_and_backward_with_mixed_counts(regional_output_steps: int) -> None:
+    model = _make_mixed_model(
+        n_step_input={"data": 1, "regional": 2},
+        n_step_output={"data": 1, "regional": regional_output_steps},
+        model_type=AnemoiModelEncProcDec,
+        pointwise=True,
+    )
+    x = {
+        "data": torch.randn(1, 1, 1, 2, 1),
+        "regional": torch.randn(1, 2, 1, 2, 1),
+    }
+
+    output = model(x)
+    assert output["data"].shape == (1, 1, 1, 2, 1)
+    assert output["regional"].shape == (1, regional_output_steps, 1, 2, 1)
+
+    sum(tensor.square().mean() for tensor in output.values()).backward()
+    assert any(p.grad is not None for p in model.encoder["regional"].parameters())
+
+
+def test_predict_step_slices_each_dataset_history() -> None:
+    model = _make_mixed_model(
+        n_step_input={"data": 1, "regional": 2},
+        n_step_output={"data": 1, "regional": 3},
+    )
+    processors = {name: IdentityProcessor() for name in model.dataset_names}
+    batch = {name: torch.ones(1, 3, 2, 1) for name in model.dataset_names}
+
+    output = model.predict_step(
+        batch,
+        pre_processors=processors,
+        post_processors=processors,
+        n_step_input=model.n_step_input,
+    )
+
+    assert output["data"].shape == (1, 1, 1, 2, 1)
+    assert output["regional"].shape == (1, 2, 1, 2, 1)
+
+
+@pytest.mark.parametrize("model_type", [DummyGraphModel, EncProcDecSubclass])
+def test_per_dataset_timestep_counts_reject_unsupported_models(model_type: type[BaseGraphModel]) -> None:
+    with pytest.raises(NotImplementedError, match=f"{model_type.__name__} does not support"):
+        _make_mixed_model(
+            n_step_input={"data": 1, "regional": 2},
+            n_step_output={"data": 1, "regional": 3},
+            model_type=model_type,
+        )
+
+
+def test_per_dataset_timestep_counts_require_matching_dataset_names() -> None:
+    with pytest.raises(ValueError, match="n_step_input dataset names do not match"):
+        _make_mixed_model(
+            n_step_input={"data": 1},
+            n_step_output={"data": 1, "regional": 3},
+        )
+
+
+def test_encoder_processor_decoder_uses_dataset_output_steps() -> None:
+    model = AnemoiModelEncProcDec.__new__(AnemoiModelEncProcDec)
+    torch.nn.Module.__init__(model)
+    model.n_step_input = {"data": 1, "regional": 2}
+    model.n_step_output = {"data": 1, "regional": 3}
+    model.input_dim = {"data": 5, "regional": 6}
+    model._internal_input_idx = {"data": [0], "regional": [0]}
+    model._internal_output_idx = {"data": [0], "regional": [0]}
+    model.boundings = torch.nn.ModuleDict({name: torch.nn.ModuleList() for name in model.input_dim})
+
+    for dataset_name, output_steps in model.n_step_output.items():
+        output = model._assemble_output(
+            torch.ones(2, output_steps),
+            torch.zeros(1, output_steps, 1, 2, 1),
+            batch_size=1,
+            ensemble_size=1,
+            dtype=torch.float32,
+            dataset_name=dataset_name,
+        )
+        assert output.shape == (1, output_steps, 1, 2, 1)
+
+    metadata = {"metadata_inference": {"data": {}, "regional": {}}}
+    model.fill_metadata(metadata)
+    assert metadata["metadata_inference"]["data"]["shapes"]["input_timesteps"] == 1
+    assert metadata["metadata_inference"]["regional"]["shapes"]["input_timesteps"] == 2
