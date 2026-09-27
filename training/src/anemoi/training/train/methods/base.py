@@ -257,6 +257,7 @@ class BaseTrainingModule(pl.LightningModule, ABC):
 
             dataset_scalers, dataset_updating_scalars = create_scalers(
                 scalers_configs[dataset_name],
+                dataset_name=dataset_name,
                 data_indices=data_indices[dataset_name],
                 task=self.task,
                 graph_data=graph_data,

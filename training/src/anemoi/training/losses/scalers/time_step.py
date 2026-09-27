@@ -56,6 +56,7 @@ class UniformTimeStepScaler(TimeStepScaler):
     def __init__(
         self,
         task: BaseTask = None,
+        dataset_name: str | None = None,
         **kwargs,
     ) -> None:
         """Initialise Scaler.
@@ -69,7 +70,12 @@ class UniformTimeStepScaler(TimeStepScaler):
             task is not None
         ), "Task must be provided to TimeStepScaler to determine the number of output steps for scaling."
         del kwargs
-        weights = [1.0] * task.num_output_timesteps
+        num_steps = task.num_output_timesteps
+        if isinstance(num_steps, dict):
+            if dataset_name is None:
+                raise ValueError("dataset_name is required for per-dataset output steps")
+            num_steps = num_steps[dataset_name]
+        weights = [1.0] * num_steps
         super().__init__(weights=weights, norm="unit-sum")
 
 
