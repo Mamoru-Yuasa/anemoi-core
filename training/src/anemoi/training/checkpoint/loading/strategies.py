@@ -259,6 +259,9 @@ class TransferLearningLoader(LoadingStrategy):
         source_state = self._extract_state_dict(context)
         target_state = context.model.state_dict()
 
+        # Graph-specific trainables follow nodes and edges, not tensor shapes.
+        source_state = self._remap_graph_trainables(context, source_state, target_state)
+
         filtered, skipped = filter_state_dict(source_state, target_state)
 
         if not self.skip_mismatched:
@@ -291,6 +294,35 @@ class TransferLearningLoader(LoadingStrategy):
             self._warn_about_skipped(len(filtered), skipped)
 
         return context
+
+    @staticmethod
+    def _remap_graph_trainables(
+        context: CheckpointContext,
+        source_state: dict[str, Any],
+        target_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Match trainable node and edge rows by graph position when the graph changed.
+
+        A trainable node or edge parameter belongs to a particular node or edge. When
+        the checkpoint's graph differs from the model's (e.g. a uniform mesh refined
+        into a stretched one), rows are matched by node coordinates (edges: source and
+        destination) against the graph stored in the checkpoint; matched rows come
+        from the checkpoint, the rest keep the model's initial values. Without a graph
+        in the checkpoint or the model the state dict is returned as it is.
+
+        Returns a new dict; the checkpoint's own state dict is not modified.
+        """
+        from anemoi.training.utils.checkpoint import remap_graph_trainables
+
+        hyper_parameters = (context.checkpoint_data or {}).get("hyper_parameters") or {}
+        ckpt_graph = hyper_parameters.get("graph_data")
+        model_graph = getattr(context.model, "hparams", {}).get("graph_data")
+        hidden_name = getattr(getattr(getattr(context.config, "model", None), "model", None), "hidden_nodes_name", None)
+        if ckpt_graph is None or model_graph is None or not isinstance(hidden_name, str):
+            return source_state
+        remapped = dict(source_state)
+        remap_graph_trainables(remapped, target_state, ckpt_graph, model_graph, hidden_name)
+        return remapped
 
     @staticmethod
     def _warn_about_skipped(transferred: int, skipped: dict[str, str]) -> None:
