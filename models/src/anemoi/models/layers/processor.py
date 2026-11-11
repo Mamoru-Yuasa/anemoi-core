@@ -141,6 +141,47 @@ class BaseProcessor(nn.Module, ABC):
 
         return data
 
+    def run_layer_range(self, start: int, end: int, data: tuple, *args, **kwargs) -> tuple:
+        """Run layers ``start`` (inclusive) to ``end`` (exclusive), counted from zero."""
+        for layer_id in range(start, end):
+            data = self.proc[layer_id](*data, *args, **kwargs)
+        return data
+
+    def check_readout_layers(self, readout_layers: list[int]) -> list[int]:
+        """Return the read-out layers sorted and unique, after checking that they exist."""
+        layers = sorted({int(layer) for layer in readout_layers})
+        if not layers or layers[0] < 1 or layers[-1] > self.num_layers:
+            raise ValueError(
+                f"Read-out layers must lie between 1 and {self.num_layers} (the processor depth), got {readout_layers}"
+            )
+        return layers
+
+    def run_layers_with_readouts(self, data: tuple, readout_layers: list[int], *args, **kwargs) -> dict[int, tuple]:
+        """Run all layers and return the state after each read-out layer.
+
+        Layers are counted from one: layer ``l`` is the state after ``l`` processor layers. The
+        checkpointed segments are the chunks, split further at the read-out layers, so a read-out
+        does not have to lie on a chunk boundary. The state after the last layer is always included.
+        """
+        layers = self.check_readout_layers([*readout_layers, self.num_layers])
+        boundaries = sorted(set(range(self.chunk_size, self.num_layers + 1, self.chunk_size)) | set(layers))
+        states = {}
+        start = 0
+        for end in boundaries:
+            data = maybe_checkpoint(
+                self.run_layer_range,
+                self.gradient_checkpointing,
+                start,
+                end,
+                data,
+                *args,
+                **kwargs,
+            )
+            if end in layers:
+                states[end] = data
+            start = end
+        return states
+
     def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
         """Example forward pass."""
         refuse_dropout_when_sharded(self, kwargs.get("model_comm_group"))
@@ -621,8 +662,9 @@ class GraphTransformerProcessor(BaseProcessor):
         model_comm_group: Optional[ProcessGroup] = None,
         edges_are_dst_sorted: bool = True,
         *args,
+        readout_layers: Optional[list[int]] = None,
         **kwargs,
-    ) -> Tensor:
+    ) -> Tensor | dict[int, Tensor]:
         """Run the graph-transformer processor.
 
         Parameters
@@ -646,13 +688,17 @@ class GraphTransformerProcessor(BaseProcessor):
             is expected to already have the right edges for its local destination nodes.
         *args : tuple
             Additional positional arguments.
+        readout_layers : list[int], optional
+            Layers (counted from one) after which the node features are returned. When given,
+            the result is a dict from each of these layers, and the last one, to the node
+            features after it.
         **kwargs : dict
             Additional keyword arguments passed to processor blocks.
 
         Returns
         -------
-        Tensor
-            Processed node features.
+        Tensor or dict[int, Tensor]
+            Processed node features, or the features after each read-out layer.
         """
         refuse_dropout_when_sharded(self, model_comm_group)
         size = sum(shard_info.nodes) if shard_info.nodes_are_sharded() else x.size(0)
@@ -684,8 +730,7 @@ class GraphTransformerProcessor(BaseProcessor):
                 model_comm_group,
             )
 
-        x, edge_attr = self.run_layers(
-            data=(x, edge_attr),
+        layer_kwargs = dict(
             edge_index=edge_index,
             shard_info=shard_info,
             batch_size=batch_size,
@@ -695,5 +740,10 @@ class GraphTransformerProcessor(BaseProcessor):
             edges_are_dst_sorted=True,  # ensured by ensure_edges_are_dst_sorted above
             **kwargs,
         )
+        if readout_layers is not None:
+            states = self.run_layers_with_readouts((x, edge_attr), readout_layers, **layer_kwargs)
+            return {layer: state[0] for layer, state in states.items()}
+
+        x, edge_attr = self.run_layers(data=(x, edge_attr), **layer_kwargs)
 
         return x
