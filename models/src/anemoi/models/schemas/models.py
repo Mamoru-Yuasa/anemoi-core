@@ -54,6 +54,10 @@ LOGGER = logging.getLogger(__name__)
 class DefinedModels(str, Enum):
     ANEMOI_MODEL_ENC_PROC_DEC = "anemoi.models.models.encoder_processor_decoder.AnemoiModelEncProcDec"
     ANEMOI_MODEL_ENC_PROC_DEC_SHORT = "anemoi.models.models.AnemoiModelEncProcDec"
+    ANEMOI_MODEL_ENC_PROC_DEC_READOUTS = (
+        "anemoi.models.models.encoder_processor_decoder_readouts.AnemoiModelEncProcDecReadouts"
+    )
+    ANEMOI_MODEL_ENC_PROC_DEC_READOUTS_SHORT = "anemoi.models.models.AnemoiModelEncProcDecReadouts"
     ANEMOI_ENS_MODEL_ENC_PROC_DEC = "anemoi.models.models.ens_encoder_processor_decoder.AnemoiEnsModelEncProcDec"
     ANEMOI_ENS_MODEL_ENC_PROC_DEC_SHORT = "anemoi.models.models.AnemoiEnsModelEncProcDec"
     ANEMOI_MODEL_HIER_ENC_PROC_DEC = "anemoi.models.models.hierarchical.AnemoiModelEncProcDecHierarchical"
@@ -77,6 +81,17 @@ class Model(BaseModel):
     "Add skip connection in latent space before/after processor."
     convert_: str = Field("none", alias="_convert_")
     "Keep OmegaConf containers when instantiating — model code uses attribute-style access throughout."
+
+
+class ReadoutModel(Model):
+    readout_layers: dict[str, list[PositiveInt]] = Field(examples=[{"gsm": [16], "msm": [10, 16]}])
+    "Processor layers (counted from one) after which each dataset is decoded, one output time per layer."
+    readout_gradient_scale: float = Field(default=1.0, ge=0.0, le=1.0)
+    "Gradient factor for read-outs before the last processor layer (forward pass unchanged)."
+    readout_residual: Literal["anchored", "accumulated"] = Field(default="anchored")
+    "Residual of each read-out: the latest input state, or the previous read-out."
+    readout_lead_time: bool = Field(default=False)
+    "Give the decoder the position of the read-out in the block as one more destination feature."
 
 
 class SparseProjectorSchema(BaseModel):
@@ -300,6 +315,11 @@ NoiseInjectorUnion = Annotated[
 ]
 
 
+class ReadoutModelSchema(BaseModelSchema):
+    model: ReadoutModel = Field(...)
+    "Model schema with read-out layers."
+
+
 class EnsModelSchema(BaseModelSchema):
     noise_injector: NoiseInjectorUnion = Field(...)
     "Noise injection configuration. Use NoOpNoiseInjector to disable, NoiseConditioning for conditioning, or NoiseInjector for direct injection."
@@ -383,6 +403,7 @@ class HierarchicalModelSchema(BaseModelSchema):
 
 ModelSchema = Union[
     BaseModelSchema,
+    ReadoutModelSchema,
     EnsModelSchema,
     HierarchicalModelSchema,
     TransportModelSchema,
