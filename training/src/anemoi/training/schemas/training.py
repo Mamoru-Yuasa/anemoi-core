@@ -779,6 +779,8 @@ class BaseTrainingSchema(BaseModel):
     "Load only the weights from the checkpoint, not the optimiser state."
     transfer_learning: bool = Field(example=False)
     "Flag to activate transfer learning mode when loading a checkpoint."
+    transfer_learning_dataset_map: dict[str, str] = Field(default_factory=dict)
+    "Model dataset -> checkpoint dataset whose network weights it starts from, e.g. {gsm: era5}."
     check_variables_compatibility: CheckVariablesCompatibilitySchema = Field(
         default_factory=CheckVariablesCompatibilitySchema,
     )

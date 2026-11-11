@@ -221,7 +221,52 @@ def save_inference_checkpoint(model: torch.nn.Module, metadata: dict, save_path:
     return inference_filepath
 
 
-def transfer_learning_loading(model: torch.nn.Module, ckpt_path: Path | str) -> nn.Module:
+_DATASET_PARENTS = "encoder|decoder|encoder_graph_provider|decoder_graph_provider|trainable_tensors"
+
+
+def map_checkpoint_datasets(checkpoint: dict, dataset_map: dict[str, str]) -> dict:
+    """Give model datasets the network weights of differently named checkpoint datasets.
+
+    ``dataset_map`` maps a dataset of the model to a dataset of the checkpoint, e.g.
+    ``{"gsm": "era5", "msm": "era5"}`` starts the GSM and MSM encoders, decoders and
+    graph-specific trainables from those of an ERA5-only checkpoint. One checkpoint dataset
+    may feed several model datasets. Only the network is mapped (encoders, decoders, their
+    graph providers and trainable node features); the normalisers keep the statistics of the
+    model's own datasets. The variable lists are mapped as well, so the usual check that the
+    variables agree applies to the mapped pairs.
+    """
+    if not dataset_map:
+        return checkpoint
+    state_dict = checkpoint["state_dict"]
+    for model_name, ckpt_name in dataset_map.items():
+        pattern = re.compile(rf"(\.(?:{_DATASET_PARENTS})\.){re.escape(ckpt_name)}(\.)")
+        copied = 0
+        for key in [k for k in state_dict if pattern.search(k)]:
+            new_key = pattern.sub(rf"\g<1>{model_name}\g<2>", key)
+            if new_key != key:
+                state_dict[new_key] = state_dict[key]
+                copied += 1
+        if not copied:
+            raise ValueError(f"Checkpoint has no network weights for dataset {ckpt_name!r}")
+        LOGGER.info("Mapped %d checkpoint tensors of dataset %r to model dataset %r", copied, ckpt_name, model_name)
+
+    hyper = checkpoint.get("hyper_parameters", {})
+    data_indices = hyper.get("data_indices")
+    if isinstance(data_indices, dict):
+        for model_name, ckpt_name in dataset_map.items():
+            data_indices[model_name] = data_indices[ckpt_name]
+    dataset_metadata = hyper.get("metadata", {}).get("dataset", {})
+    for model_name, ckpt_name in dataset_map.items():
+        if ckpt_name in dataset_metadata:
+            dataset_metadata[model_name] = dataset_metadata[ckpt_name]
+    return checkpoint
+
+
+def transfer_learning_loading(
+    model: torch.nn.Module,
+    ckpt_path: Path | str,
+    dataset_map: dict[str, str] | None = None,
+) -> nn.Module:
     # Load the checkpoint
     # Load to CPU explictly, to avoid loading entire model on GPU initially
     # Modifications to the model occur on cpu,
@@ -232,6 +277,9 @@ def transfer_learning_loading(model: torch.nn.Module, ckpt_path: Path | str) -> 
     # apply chunking migration (fails silently otherwise leading to hard to debug issues)
     # this is due to loading with strict=False, planning to make this more robust in the future
     checkpoint = chunking_fix_migration(checkpoint)
+
+    # Datasets renamed between checkpoint and model (e.g. ERA5 pre-training -> GSM fine-tuning).
+    checkpoint = map_checkpoint_datasets(checkpoint, dict(dataset_map or {}))
 
     # Refresh processor stats from the current dataset if configured.
     model._update_checkpoint_state_dict_for_load(checkpoint)
