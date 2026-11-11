@@ -237,28 +237,28 @@ def map_checkpoint_datasets(checkpoint: dict, dataset_map: dict[str, str]) -> di
     """
     if not dataset_map:
         return checkpoint
+    # Every copy reads the checkpoint as loaded, so that names may be swapped.
     state_dict = checkpoint["state_dict"]
+    original = dict(state_dict)
+    copies = {}
     for model_name, ckpt_name in dataset_map.items():
         pattern = re.compile(rf"(\.(?:{_DATASET_PARENTS})\.){re.escape(ckpt_name)}(\.)")
-        copied = 0
-        for key in [k for k in state_dict if pattern.search(k)]:
-            new_key = pattern.sub(rf"\g<1>{model_name}\g<2>", key)
-            if new_key != key:
-                state_dict[new_key] = state_dict[key]
-                copied += 1
-        if not copied:
+        matched = {pattern.sub(rf"\g<1>{model_name}\g<2>", key): value for key, value in original.items()
+                   if pattern.search(key)}
+        if not matched:
             raise ValueError(f"Checkpoint has no network weights for dataset {ckpt_name!r}")
-        LOGGER.info("Mapped %d checkpoint tensors of dataset %r to model dataset %r", copied, ckpt_name, model_name)
+        copies.update(matched)
+        LOGGER.info("Mapped %d checkpoint tensors of dataset %r to model dataset %r", len(matched), ckpt_name,
+                    model_name)
+    state_dict.update(copies)
 
     hyper = checkpoint.get("hyper_parameters", {})
-    data_indices = hyper.get("data_indices")
-    if isinstance(data_indices, dict):
-        for model_name, ckpt_name in dataset_map.items():
-            data_indices[model_name] = data_indices[ckpt_name]
-    dataset_metadata = hyper.get("metadata", {}).get("dataset", {})
-    for model_name, ckpt_name in dataset_map.items():
-        if ckpt_name in dataset_metadata:
-            dataset_metadata[model_name] = dataset_metadata[ckpt_name]
+    for container in (hyper.get("data_indices"), hyper.get("metadata", {}).get("dataset")):
+        if isinstance(container, dict):
+            original = dict(container)
+            for model_name, ckpt_name in dataset_map.items():
+                if ckpt_name in original:
+                    container[model_name] = original[ckpt_name]
     return checkpoint
 
 

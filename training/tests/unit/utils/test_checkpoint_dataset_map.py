@@ -58,3 +58,14 @@ def test_empty_map_leaves_the_checkpoint_unchanged():
     checkpoint = _checkpoint()
     keys = set(checkpoint["state_dict"])
     assert set(map_checkpoint_datasets(checkpoint, {})["state_dict"]) == keys
+
+
+def test_names_can_be_swapped():
+    checkpoint = _checkpoint()
+    state = checkpoint["state_dict"]
+    state["model.model.encoder.gsm.emb_nodes_src.weight"] = torch.full((2,), 9.0)
+    checkpoint["hyper_parameters"]["data_indices"]["gsm"] = "gsm indices"
+    map_checkpoint_datasets(checkpoint, {"gsm": "era5", "era5": "gsm"})
+    assert state["model.model.encoder.gsm.emb_nodes_src.weight"][0] == 1
+    assert state["model.model.encoder.era5.emb_nodes_src.weight"][0] == 9
+    assert checkpoint["hyper_parameters"]["data_indices"] == {"gsm": "indices", "era5": "gsm indices"}
