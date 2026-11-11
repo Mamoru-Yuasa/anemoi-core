@@ -339,6 +339,58 @@ class AnemoiModelEncProcDec(BaseGraphModel):
         dict[str, Tensor]
             Output of the model, with the same shape as the input (sharded if input is sharded).
         """
+        state = self._encode(x, model_comm_group=model_comm_group, grid_shard_sizes=grid_shard_sizes)
+
+        x_latent_proc = self._process(state, model_comm_group=model_comm_group)
+
+        # Latent skip connection
+        if self.latent_skip:
+            x_latent_proc = x_latent_proc + state["x_latent"]
+
+        # Decoder
+        x_out_dict = {}
+        for dataset_name in self.target_datasets:
+            x_target_latent, shard_sizes_target = self._assemble_targets(
+                x[dataset_name],
+                state["x_data_latent"].get(dataset_name, None),
+                state["batch_size"],
+                grid_shard_sizes,
+                model_comm_group,
+                dataset_name,
+            )
+            x_out = self._decode(
+                x_latent_proc,
+                x_target_latent,
+                shard_sizes_target,
+                state,
+                dataset_name,
+                model_comm_group=model_comm_group,
+            )
+
+            x_out_dict[dataset_name] = self._assemble_output(
+                x_out,
+                state["x_skip"].get(dataset_name, None),
+                batch_size=state["batch_size"],
+                ensemble_size=state["ensemble_size"],
+                dtype=x[dataset_name].dtype,
+                dataset_name=dataset_name,
+            )
+
+        return x_out_dict
+
+    def _encode(
+        self,
+        x: dict[str, Tensor],
+        *,
+        model_comm_group: Optional[ProcessGroup] = None,
+        grid_shard_sizes: DatasetShardSizes | None = None,
+    ) -> dict:
+        """Encode every input dataset onto the hidden mesh and aggregate the latents.
+
+        Returns a dict with the aggregated latent (``x_latent``), the per-dataset residual
+        skips (``x_skip``) and encoded data (``x_data_latent``), and the batch, ensemble and
+        sharding information the processor and the decoders need.
+        """
         dataset_names = list(x.keys())
 
         # Extract and validate batch & ensemble sizes across datasets
@@ -408,77 +460,73 @@ class AnemoiModelEncProcDec(BaseGraphModel):
         # Combine all dataset latents
         x_latent = self.latent_aggregator(x_hidden_latent, dataset_latents)
 
-        # Processor
+        return {
+            "x_latent": x_latent,
+            "x_skip": x_skip_dict,
+            "x_data_latent": x_data_latent_dict,
+            "batch_size": batch_size,
+            "ensemble_size": ensemble_size,
+            "in_out_sharded": in_out_sharded,
+            "shard_sizes_hidden": shard_sizes_hidden,
+        }
+
+    def _process(self, state: dict, *, model_comm_group: Optional[ProcessGroup] = None, **kwargs):
+        """Run the processor on the aggregated latent; extra keyword arguments go to the processor."""
         (
             processor_edge_attr,
             processor_edge_index,
             proc_edge_shard_sizes,
         ) = self.processor_graph_provider.get_edges(
-            batch_size=batch_size,
+            batch_size=state["batch_size"],
             model_comm_group=model_comm_group,
         )
 
-        x_latent_proc = self.processor(
-            x=x_latent,
-            batch_size=batch_size,
-            shard_info=GraphShardInfo(nodes=shard_sizes_hidden, edges=proc_edge_shard_sizes),
+        return self.processor(
+            x=state["x_latent"],
+            batch_size=state["batch_size"],
+            shard_info=GraphShardInfo(nodes=state["shard_sizes_hidden"], edges=proc_edge_shard_sizes),
             edge_attr=processor_edge_attr,
             edge_index=processor_edge_index,
             model_comm_group=model_comm_group,
+            **kwargs,
         )
 
-        # Latent skip connection
-        if self.latent_skip:
-            x_latent_proc = x_latent_proc + x_latent
+    def _decode(
+        self,
+        x_latent_proc: Tensor,
+        x_target_latent: Tensor,
+        shard_sizes_target: ShardSizes,
+        state: dict,
+        dataset_name: str,
+        *,
+        model_comm_group: Optional[ProcessGroup] = None,
+    ) -> Tensor:
+        """Map a hidden-mesh latent to the data nodes of one dataset (flat decoder output)."""
+        # Compute decoder edges using updated latent representation
+        (
+            decoder_edge_attr,
+            decoder_edge_index,
+            dec_edge_shard_sizes,
+        ) = self.decoder_graph_provider[
+            dataset_name
+        ].get_edges(batch_size=state["batch_size"], model_comm_group=model_comm_group)
 
-        # Decoder
-        x_out_dict = {}
-        for dataset_name in self.target_datasets:
-            x_target_latent, shard_sizes_target = self._assemble_targets(
-                x[dataset_name],
-                x_data_latent_dict.get(dataset_name, None),
-                batch_size,
-                grid_shard_sizes,
-                model_comm_group,
-                dataset_name,
-            )
+        dec_shard_info = BipartiteGraphShardInfo(
+            src_nodes=state["shard_sizes_hidden"],
+            dst_nodes=shard_sizes_target,  # None if not sharded
+            edges=dec_edge_shard_sizes,
+        )
 
-            # Compute decoder edges using updated latent representation
-            (
-                decoder_edge_attr,
-                decoder_edge_index,
-                dec_edge_shard_sizes,
-            ) = self.decoder_graph_provider[
-                dataset_name
-            ].get_edges(batch_size=batch_size, model_comm_group=model_comm_group)
-
-            dec_shard_info = BipartiteGraphShardInfo(
-                src_nodes=shard_sizes_hidden,
-                dst_nodes=shard_sizes_target,  # None if not sharded
-                edges=dec_edge_shard_sizes,
-            )
-
-            decoder_name = self.dataset2decoder[dataset_name]
-            x_out = self.decoder[decoder_name](
-                (x_latent_proc, x_target_latent),
-                batch_size=batch_size,
-                shard_info=dec_shard_info,
-                edge_attr=decoder_edge_attr,
-                edge_index=decoder_edge_index,
-                model_comm_group=model_comm_group,
-                keep_x_dst_sharded=in_out_sharded[dataset_name],  # keep x_out sharded iff in_out_sharded
-            )
-
-            x_out_dict[dataset_name] = self._assemble_output(
-                x_out,
-                x_skip_dict.get(dataset_name, None),
-                batch_size=batch_size,
-                ensemble_size=ensemble_size,
-                dtype=x[dataset_name].dtype,
-                dataset_name=dataset_name,
-            )
-
-        return x_out_dict
+        decoder_name = self.dataset2decoder[dataset_name]
+        return self.decoder[decoder_name](
+            (x_latent_proc, x_target_latent),
+            batch_size=state["batch_size"],
+            shard_info=dec_shard_info,
+            edge_attr=decoder_edge_attr,
+            edge_index=decoder_edge_index,
+            model_comm_group=model_comm_group,
+            keep_x_dst_sharded=state["in_out_sharded"][dataset_name],  # keep x_out sharded iff in_out_sharded
+        )
 
     def fill_metadata(self, md_dict) -> None:
         for dataset in self.input_dim.keys():
