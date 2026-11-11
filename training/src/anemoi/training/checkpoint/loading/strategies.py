@@ -234,10 +234,17 @@ class TransferLearningLoader(LoadingStrategy):
     skip_mismatched : bool, optional
         Whether to skip keys with mismatched shapes (default: True).
         If False, shape mismatches raise ``CheckpointIncompatibleError``.
+    dataset_map : dict[str, str], optional
+        Model dataset -> checkpoint dataset whose network weights it starts from,
+        e.g. ``{"gsm": "era5", "msm": "era5"}`` (see
+        :func:`anemoi.training.utils.checkpoint.map_checkpoint_datasets`). Applied
+        to the checkpoint before anything else, so the variable and unit checks
+        compare each model dataset with the checkpoint dataset it starts from.
     """
 
-    def __init__(self, skip_mismatched: bool = True) -> None:
+    def __init__(self, skip_mismatched: bool = True, dataset_map: dict[str, str] | None = None) -> None:
         self.skip_mismatched = skip_mismatched
+        self.dataset_map = dict(dataset_map or {})
 
     def process(self, context: CheckpointContext) -> CheckpointContext:
         """Filter and load compatible weights from checkpoint.
@@ -253,6 +260,10 @@ class TransferLearningLoader(LoadingStrategy):
             Context with compatible weights loaded and metadata updated.
         """
         from anemoi.training.checkpoint.loading.utils import filter_state_dict
+        from anemoi.training.utils.checkpoint import map_checkpoint_datasets
+
+        if self.dataset_map and context.checkpoint_data is not None:
+            context.checkpoint_data = map_checkpoint_datasets(context.checkpoint_data, self.dataset_map)
 
         self._apply_corrections(context)
 
