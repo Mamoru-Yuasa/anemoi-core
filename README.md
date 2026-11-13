@@ -1,5 +1,10 @@
 # anemoi-core
 
+> **Fork:** this is the research fork `Mamoru-Yuasa/anemoi-core` (branch
+> `research/mixed-cadence-anemoi-0.20`, tag `mixed-cadence-2`). Its additions to
+> upstream (mixed-cadence training, read-out models, transfer across datasets and
+> graphs) are described in [FORK.md](FORK.md).
+
 <p align="center">
   <a href="https://github.com/ecmwf/codex/raw/refs/heads/main/Project Maturity">
     <img src="https://github.com/ecmwf/codex/raw/refs/heads/main/Project Maturity/incubating_badge.svg" alt="Maturity Level">
