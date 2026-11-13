@@ -551,6 +551,11 @@ parameter with its reason at WARNING and records them in the run metadata.
    in the run metadata.
 -  ``skip_mismatched: false`` — treat a shape mismatch as an error
    (``CheckpointIncompatibleError``) instead of skipping it.
+-  ``dataset_map`` (fork only) — start differently named model datasets
+   from the network weights of a checkpoint dataset, e.g.
+   ``{gsm: era5, msm: era5}``. With a graph in the checkpoint, the fork
+   also transfers trainable node and edge tensors by graph position. See
+   :ref:`checkpoint-dataset-map`.
 
 The original checkpoint file is never modified; the filtering builds a new,
 in-memory subset. To also **freeze** the transferred layers, add a freezing

@@ -220,6 +220,41 @@ For example, with a single input and outputs ``["2H", "3H"]`` both ``2H`` and
     rollout_shift: "2H"   # overwrites the default, 3H
 
 
+************************
+ MixedCadenceForecaster
+************************
+
+.. note::
+
+   Fork only (``Mamoru-Yuasa/anemoi-core``, tag ``mixed-cadence-2``).
+
+:class:`~anemoi.training.tasks.mixed_cadence_forecaster.MixedCadenceForecaster`
+forecasts several datasets at their own native time steps within one
+common block (e.g. global 6h and regional 3h in a 6h block). It is
+constructed with:
+
+- ``dataset_timesteps`` — native time step of every dataset; each must
+  divide ``block_timestep``.
+- ``block_timestep`` — time advanced by one model call (the rollout
+  shift).
+- ``multistep_input`` — number of input dates, one integer or one per
+  dataset.
+- ``input_offsets`` — optional explicit input offsets per dataset,
+  ending at ``0h``.
+- ``rollout`` / ``validation_rollout`` — as for ``Forecaster``, in
+  blocks.
+
+``num_input_timesteps`` and ``num_output_timesteps`` are dictionaries by
+dataset, and ``get_offsets`` / ``get_input_offsets`` /
+``get_output_offsets`` take a ``dataset_name``. See
+:ref:`mixed-cadence target` for the data alignment, the advance map and
+the checkpoint metadata.
+
+.. automodule:: anemoi.training.tasks.mixed_cadence_forecaster
+   :members: MixedCadenceForecaster
+   :no-undoc-members:
+   :show-inheritance:
+
 *********************
  TemporalDownscaler
 *********************

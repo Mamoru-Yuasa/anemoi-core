@@ -46,6 +46,11 @@ The four built-in tasks are:
           epoch_increment: 1
           maximum: 12
 
+``MixedCadenceForecaster`` (fork only)
+   Forecasts several datasets at their own native time steps in one
+   common block, e.g. a global dataset every 6h and a regional dataset
+   every 3h. See :ref:`mixed-cadence target`.
+
 ``OffsetForecaster``
    An experimental generalization of ``Forecaster`` where inputs and
    outputs are specified directly as time offsets relative to the start

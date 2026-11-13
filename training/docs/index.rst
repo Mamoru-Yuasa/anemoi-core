@@ -40,6 +40,7 @@ This package provides the *Anemoi* training functionality.
    user-guide/training
    user-guide/evaluation
    user-guide/tasks
+   user-guide/mixed-cadence
    user-guide/training-methods
    user-guide/models
    user-guide/tracking
@@ -54,6 +55,7 @@ This package provides the *Anemoi* training functionality.
 
    checkpoint_integration
    checkpoint_pipeline_configuration
+   checkpoint_dataset_map
    checkpoint_troubleshooting
 
 .. toctree::
