@@ -55,6 +55,19 @@ encoded latent. Reproduce it with two changes:
 
 See :ref:`usage-multi-dataset` for the full list of target features.
 
+***************************************************
+ Encoder-Processor-Decoder Model with Read-outs
+***************************************************
+
+Fork only (``Mamoru-Yuasa/anemoi-core``, tag ``mixed-cadence-2``):
+decodes each dataset after chosen processor layers, one output time per
+layer. See :ref:`usage-readout-models`.
+
+.. automodule:: anemoi.models.models.encoder_processor_decoder_readouts
+   :members:
+   :no-undoc-members:
+   :show-inheritance:
+
 ******************************************
  Ensemble Encoder-Processor-Decoder Model
 ******************************************
