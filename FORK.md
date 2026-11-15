@@ -53,7 +53,7 @@ setuptools-scm tag patterns of the packages).
 | Multi-dataset samples aligned by **date** instead of position (`compute_aligned_anchors`, `MultiDataset.reader_anchors`) | `training/docs/user-guide/mixed-cadence.rst` |
 | Per-dataset task offsets, tendency statistics at each dataset's lead times, per-dataset `UniformTimeStepScaler` | `training/docs/user-guide/mixed-cadence.rst` |
 | Per-dataset `n_step_input` / `n_step_output` in the models | `models/docs/usage/readout_models.rst` |
-| `AnemoiModelEncProcDecReadouts`: decode each dataset after chosen processor layers, with gradient gate, residual mode and lead-time feature | `models/docs/usage/readout_models.rst`, `models/docs/modules/models.rst` |
+| `AnemoiModelEncProcDecReadouts`: decode each dataset after chosen processor layers (graph-transformer or transformer processor), with gradient gate, residual mode and lead-time feature | `models/docs/usage/readout_models.rst`, `models/docs/modules/models.rst` |
 | `TransferLearningLoader(dataset_map=...)`: start renamed model datasets from a checkpoint dataset | `training/docs/checkpoint_dataset_map.rst` |
 | Transfer of trainable node and edge tensors by graph position when the graph changes | `training/docs/checkpoint_dataset_map.rst` |
 
@@ -77,6 +77,7 @@ setuptools-scm tag patterns of the packages).
 | `c5c4e7e05` feat(training): start renamed datasets from checkpoint datasets | `map_checkpoint_datasets` and `TransferLearningLoader(dataset_map=...)`. |
 | `6a48ea067` fix(training): copy mapped datasets from the checkpoint as loaded | Every mapped copy reads the checkpoint as loaded, so names may be swapped in one map. |
 | `0730af7d0`, `d680b8c05`, and the commit of this file: docs | The documentation pages listed above, `FORK.md` and a pointer in `README.md`. |
+| `74978a898` models: read the transformer processor out after chosen layers | `TransformerProcessor.forward(readout_layers=...)` returns `{layer: features}` through `BaseProcessor.run_layers_with_readouts`, as the graph transformer does, so the read-out model can be built on the processor of AIFS. |
 
 Tests added (805 lines): `training/tests/unit/data/test_multidataset.py`,
 `test_relative_time_indices.py`, `test_datamodule_mixed_frequency.py`,
@@ -110,8 +111,8 @@ Tests added (805 lines): `training/tests/unit/data/test_multidataset.py`,
 - Per-dataset step counts: only `AnemoiModelEncProcDec` and
   `AnemoiModelEncProcDecReadouts`; ensemble, transport and hierarchical models
   raise `NotImplementedError`.
-- Read-outs: only `GraphTransformerProcessor`; every read-out dataset needs its
-  own decoder.
+- Read-outs: `GraphTransformerProcessor` and `TransformerProcessor` only; every
+  read-out dataset needs its own decoder.
 - The plot callbacks assume one step count for all datasets; disable them
   (`diagnostics.plot.datasets_to_plot: []`) for mixed-cadence runs.
 - Inference of mixed-cadence checkpoints needs the anemoi-inference fork.
@@ -127,3 +128,8 @@ Tests added (805 lines): `training/tests/unit/data/test_multidataset.py`,
   (3 h) fine-tuning with `dataset_map: {gsm: era5, msm: era5}` and the
   read-out model, all completed; losses and transferred row counts are
   recorded in `docs/staged_training.md` of regional_AI.
+- Transformer read-outs (2026-11-15): `test_processor_readouts.py` 22 passed (the
+  9 transformer cases compare each read-out with a truncated processor, with and
+  without checkpointing); on the GPU, the read-out model on the transformer
+  processor of AIFS Single 2.0 (weights carried over) trained on one day of ERA5
+  O320 (regional_AI, `configs/anemoi/train_aifs_stage_b_test.yaml`).
