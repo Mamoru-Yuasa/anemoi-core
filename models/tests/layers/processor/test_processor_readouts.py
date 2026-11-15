@@ -7,7 +7,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-"""Intermediate states of the graph-transformer processor (read-outs)."""
+"""Intermediate states of the graph-transformer and transformer processors (read-outs)."""
 
 import pytest
 import torch
@@ -16,6 +16,7 @@ from torch_geometric.data import HeteroData
 from anemoi.models.distributed.shapes import GraphShardInfo
 from anemoi.models.layers.graph_provider import create_graph_provider
 from anemoi.models.layers.processor import GraphTransformerProcessor
+from anemoi.models.layers.processor import TransformerProcessor
 from anemoi.models.layers.utils import load_layer_kernels
 from anemoi.models.models.encoder_processor_decoder_readouts import scale_gradient
 
@@ -96,3 +97,43 @@ def test_scale_gradient(scale):
     torch.testing.assert_close(y, a.detach() * 2.0)
     (y.sum() + 0.0 * a.sum()).backward()  # keeps a graph when scale is 0
     torch.testing.assert_close(a.grad, torch.full_like(a, 2.0 * scale))
+
+
+def _transformer(num_layers: int, num_chunks: int, checkpointing: bool):
+    torch.manual_seed(0)
+    processor = TransformerProcessor(
+        num_layers=num_layers,
+        num_channels=CHANNELS,
+        num_chunks=num_chunks,
+        num_heads=4,
+        mlp_hidden_ratio=2,
+        window_size=8,
+        attention_implementation="scaled_dot_product_attention",
+        cpu_offload=False,
+        layer_kernels=load_layer_kernels(instance=False),
+        gradient_checkpointing=checkpointing,
+    )
+    shard_info = GraphShardInfo(nodes=[NUM_NODES], edges=None)
+    return processor, (1, shard_info)
+
+
+@pytest.mark.parametrize("checkpointing", [False, True])
+@pytest.mark.parametrize("readouts", [[2, 4], [3, 4], [1, 2, 3], [4]])
+def test_transformer_readouts_match_truncated_processors(readouts, checkpointing):
+    """As for the graph transformer: the state after layer l equals the first l layers' output."""
+    processor, args = _transformer(num_layers=4, num_chunks=2, checkpointing=checkpointing)
+    x = torch.rand(NUM_NODES, CHANNELS)
+    states = processor(x, *args, readout_layers=readouts)
+    assert sorted(states) == sorted(set(readouts) | {4})
+    torch.testing.assert_close(states[4], processor(x, *args), rtol=0, atol=0)
+    for layer in readouts:
+        truncated, _ = _transformer(num_layers=layer, num_chunks=1, checkpointing=False)
+        truncated.load_state_dict({k: v for k, v in processor.state_dict().items() if k in truncated.state_dict()})
+        torch.testing.assert_close(states[layer], truncated(x, *args), rtol=1e-6, atol=1e-6)
+
+
+def test_transformer_readout_layers_are_checked():
+    processor, args = _transformer(num_layers=4, num_chunks=2, checkpointing=False)
+    x = torch.rand(NUM_NODES, CHANNELS)
+    with pytest.raises(ValueError):
+        processor(x, *args, readout_layers=[5])

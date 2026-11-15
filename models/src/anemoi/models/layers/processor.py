@@ -348,13 +348,26 @@ class TransformerProcessor(BaseProcessor):
         edge_index: Optional[Adj] = None,
         model_comm_group: Optional[ProcessGroup] = None,
         *args,
+        readout_layers: Optional[list[int]] = None,
         **kwargs,
-    ) -> Tensor:
+    ) -> Tensor | dict[int, Tensor]:
+        """Run the transformer processor.
+
+        With ``readout_layers`` (counted from one) the result is a dict from each of these
+        layers, and the last one, to the node features after it, as for
+        GraphTransformerProcessor.
+        """
         refuse_dropout_when_sharded(self, model_comm_group)
         if model_comm_group:
             assert (
                 model_comm_group.size() == 1 or batch_size == 1
             ), "Only batch size of 1 is supported when model is sharded accross GPUs"
+
+        if readout_layers is not None:
+            states = self.run_layers_with_readouts(
+                (x,), readout_layers, shard_info, batch_size, model_comm_group=model_comm_group, **kwargs
+            )
+            return {layer: state[0] for layer, state in states.items()}
 
         (x,) = self.run_layers((x,), shard_info, batch_size, model_comm_group=model_comm_group, **kwargs)
 
